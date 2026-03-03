@@ -1,9 +1,10 @@
 import logging
 from typing import Annotated
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from graphiti_core import Graphiti  # type: ignore
 from graphiti_core.edges import EntityEdge  # type: ignore
+from graphiti_core.embedder import EmbedderClient, OpenAIEmbedder, OpenAIEmbedderConfig  # type: ignore
 from graphiti_core.errors import EdgeNotFoundError, GroupsEdgesNotFoundError, NodeNotFoundError
 from graphiti_core.llm_client import LLMClient  # type: ignore
 from graphiti_core.nodes import EntityNode, EpisodicNode  # type: ignore
@@ -15,8 +16,15 @@ logger = logging.getLogger(__name__)
 
 
 class ZepGraphiti(Graphiti):
-    def __init__(self, uri: str, user: str, password: str, llm_client: LLMClient | None = None):
-        super().__init__(uri, user, password, llm_client)
+    def __init__(
+        self,
+        uri: str,
+        user: str,
+        password: str,
+        llm_client: LLMClient | None = None,
+        embedder: EmbedderClient | None = None,
+    ):
+        super().__init__(uri, user, password, llm_client, embedder=embedder)
 
     async def save_entity_node(self, name: str, uuid: str, group_id: str, summary: str = ''):
         new_node = EntityNode(
@@ -71,11 +79,23 @@ class ZepGraphiti(Graphiti):
             raise HTTPException(status_code=404, detail=e.message) from e
 
 
-async def get_graphiti(settings: ZepEnvDep):
+def create_graphiti(settings: ZepEnvDep) -> ZepGraphiti:
+    """Create and configure a ZepGraphiti instance. Used at startup for the shared app instance."""
+    # Configure embedder when using a custom base URL (e.g. Modelverse) so embedding model is supported
+    embedder = None
+    if settings.openai_base_url is not None or settings.embedding_model_name is not None:
+        embedder_config = OpenAIEmbedderConfig(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            embedding_model=settings.embedding_model_name or 'text-embedding-3-large',
+        )
+        embedder = OpenAIEmbedder(config=embedder_config)
+
     client = ZepGraphiti(
         uri=settings.neo4j_uri,
         user=settings.neo4j_user,
         password=settings.neo4j_password,
+        embedder=embedder,
     )
     if settings.openai_base_url is not None:
         client.llm_client.config.base_url = settings.openai_base_url
@@ -83,20 +103,12 @@ async def get_graphiti(settings: ZepEnvDep):
         client.llm_client.config.api_key = settings.openai_api_key
     if settings.model_name is not None:
         client.llm_client.model = settings.model_name
-
-    try:
-        yield client
-    finally:
-        await client.close()
+    return client
 
 
-async def initialize_graphiti(settings: ZepEnvDep):
-    client = ZepGraphiti(
-        uri=settings.neo4j_uri,
-        user=settings.neo4j_user,
-        password=settings.neo4j_password,
-    )
-    await client.build_indices_and_constraints()
+def get_graphiti(request: Request) -> ZepGraphiti:
+    """Return the shared Graphiti instance from app state (created in lifespan)."""
+    return request.app.state.graphiti
 
 
 def get_fact_result_from_edge(edge: EntityEdge):
