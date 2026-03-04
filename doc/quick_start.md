@@ -2,6 +2,8 @@
 
 Default base URL: **http://localhost:8000** (override with `BASE_URL`). Start the server from `server/`: `uvicorn graph_service.main:app --reload`.
 
+**Server note:** `POST /messages` is processed by a background worker. The worker is started in the **app lifespan** (in `main.py`), not in the router. If the worker is not started, `POST /messages` returns 503. This avoids the historical bug where the worker was tied to an APIRouter lifespan (which FastAPI does not run when the router is included) or used a request-scoped Graphiti client (leading to "Driver closed"). See [PR #1178](https://github.com/getzep/graphiti/pull/1178).
+
 ---
 
 ## 1. Build the graph (POST APIs)
