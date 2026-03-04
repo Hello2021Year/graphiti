@@ -1,5 +1,5 @@
 """
-Ingest router: POST /messages (async worker), entity-node, clear, delete endpoints.
+Ingest router: POST /messages (async worker), POST /ingest/file, entity-node, clear, delete endpoints.
 
 Worker lifecycle: started in app lifespan (main.py), not in router lifespan.
 FastAPI does not run APIRouter lifespan when the router is included, so the worker
@@ -9,15 +9,27 @@ See: https://github.com/getzep/graphiti/pull/1178
 """
 import asyncio
 import logging
+import os
+import tempfile
 from functools import partial
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 from graphiti_core.errors import NodeNotFoundError  # type: ignore
 from graphiti_core.nodes import EpisodeType  # type: ignore
+from graphiti_core.utils.bulk_utils import RawEpisode  # type: ignore
+from graphiti_core.utils.content_chunking import chunk_text_content  # type: ignore
+from graphiti_core.utils.datetime_utils import utc_now  # type: ignore
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data  # type: ignore
 
 from graph_service.config import get_settings
-from graph_service.dto import AddEntityNodeRequest, AddMessagesRequest, Message, Result
+from graph_service.dto import (
+    AddEntityNodeRequest,
+    AddMessagesRequest,
+    FileIngestResponse,
+    Message,
+    Result,
+)
+from graph_service.parsers import parse_file
 from graph_service.zep_graphiti import create_graphiti, ZepGraphitiDep
 
 logger = logging.getLogger(__name__)
@@ -113,6 +125,133 @@ async def add_messages(request: AddMessagesRequest):
         enqueued += 1
     logger.info('POST /messages: enqueued %s message(s) for group_id=%s', enqueued, request.group_id)
     return Result(message='Messages added to processing queue', success=True)
+
+
+async def _file_ingest_task(
+    path: str,
+    name: str,
+    group_id: str | None,
+    desc: str | None,
+    use_bulk: bool,
+) -> None:
+    """Parse file to Markdown, optionally chunk, then add_episode or add_episode_bulk."""
+    try:
+        text = await asyncio.to_thread(parse_file, path)
+        if not text.strip():
+            logger.warning('Parsed file %s produced empty text', name)
+            return
+        now = utc_now()
+        desc = desc or name
+        if use_bulk:
+            chunks = chunk_text_content(text)
+            raw_episodes = [
+                RawEpisode(
+                    name=f'{name}#{i}',
+                    content=chunk,
+                    source_description=desc,
+                    source=EpisodeType.text,
+                    reference_time=now,
+                )
+                for i, chunk in enumerate(chunks)
+            ]
+            await async_worker.graphiti.add_episode_bulk(raw_episodes, group_id=group_id)
+            logger.info(
+                'File ingest (bulk) completed: %s -> %s episodes (graphiti_id=%s)',
+                name,
+                len(raw_episodes),
+                group_id,
+            )
+        else:
+            await async_worker.graphiti.add_episode(
+                name=name,
+                episode_body=text,
+                source=EpisodeType.text,
+                source_description=desc,
+                reference_time=now,
+                group_id=group_id,
+            )
+            logger.info('File ingest completed: %s (graphiti_id=%s)', name, group_id)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError as e:
+            logger.warning('Failed to remove temp file %s: %s', path, e)
+
+
+@router.post(
+    '/ingest/file',
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=FileIngestResponse,
+    summary='Upload file and ingest into graph',
+    description=(
+        'Upload a file (PDF, Word, Excel, PowerPoint, etc.); it is converted to Markdown and '
+        'ingested. Use **graphiti_id** to associate with a graph/partition. '
+        'With **use_bulk**=true (default), content is chunked and sent via add_episode_bulk for faster graph build.'
+    ),
+)
+@router.post(
+    '/submit/file',
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=FileIngestResponse,
+    summary='Submit file (提交文件)',
+    description='Same as POST /ingest/file: upload a file to be parsed and ingested into the graph.',
+)
+async def ingest_file(
+    file: UploadFile = File(..., description='File to ingest (e.g. PDF, DOCX, XLSX)'),
+    graphiti_id: str | None = Query(
+        default=None,
+        description='Graph/group id to associate with the ingested file. Optional.',
+    ),
+    source_description: str | None = Query(
+        default=None,
+        description='Source description for the episode (e.g. document title). Optional.',
+    ),
+    use_bulk: bool = Query(
+        default=True,
+        description='If true, chunk content and use add_episode_bulk for faster graph build; else single add_episode.',
+    ),
+):
+    """Upload a file, parse to Markdown, and queue for graph ingest. Options appear in Swagger."""
+    if async_worker.graphiti is None:
+        logger.error('POST /ingest/file rejected: ingest worker not started')
+        raise HTTPException(
+            status_code=503,
+            detail='Ingest worker not ready. Ensure server uses app lifespan that starts the worker.',
+        )
+
+    filename = file.filename or 'unknown'
+    suffix = os.path.splitext(filename)[1] or ''
+    fd, temp_path = tempfile.mkstemp(suffix=suffix)
+    try:
+        os.close(fd)
+        content = await file.read()
+        with open(temp_path, 'wb') as f:
+            f.write(content)
+    except Exception as e:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        logger.error('Failed to save uploaded file: %s', e)
+        raise HTTPException(status_code=400, detail=f'Failed to save file: {e}') from e
+
+    await async_worker.queue.put(
+        partial(
+            _file_ingest_task,
+            temp_path,
+            filename,
+            graphiti_id,
+            source_description,
+            use_bulk,
+        ),
+    )
+    logger.info('POST /ingest/file: enqueued file=%s graphiti_id=%s use_bulk=%s', filename, graphiti_id, use_bulk)
+    return FileIngestResponse(
+        message='File added to processing queue',
+        success=True,
+        filename=filename,
+        graphiti_id=graphiti_id,
+    )
 
 
 @router.post('/entity-node', status_code=status.HTTP_201_CREATED)
