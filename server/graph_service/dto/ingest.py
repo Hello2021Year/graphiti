@@ -21,4 +21,6 @@ class FileIngestResponse(BaseModel):
     message: str = Field(..., description='Status message')
     success: bool = Field(..., description='Whether the request was accepted')
     filename: str = Field(..., description='Original filename')
-    graphiti_id: str | None = Field(default=None, description='Graph/group id used for ingest (if provided)')
+    graphiti_id: str | None = Field(
+        default=None, description='Graph/group id used for ingest (if provided)'
+    )

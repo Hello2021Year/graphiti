@@ -5,7 +5,7 @@
 
 set -e
 BASE_URL="${BASE_URL:-http://localhost:8000}"
-GROUP_ID="${GROUP_ID:-quick-start-group}"
+GROUP_ID="${GROUP_ID:-quick-start-group-new}"
 
 echo "Using BASE_URL=$BASE_URL GROUP_ID=$GROUP_ID"
 

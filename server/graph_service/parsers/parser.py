@@ -2,6 +2,7 @@
 File-to-Markdown parser using Microsoft MarkItDown.
 Used by the file ingest API to convert uploaded files to text for graph building.
 """
+
 import logging
 
 logger = logging.getLogger(__name__)

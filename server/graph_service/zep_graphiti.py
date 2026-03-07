@@ -4,7 +4,11 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request
 from graphiti_core import Graphiti  # type: ignore
 from graphiti_core.edges import EntityEdge  # type: ignore
-from graphiti_core.embedder import EmbedderClient, OpenAIEmbedder, OpenAIEmbedderConfig  # type: ignore
+from graphiti_core.embedder import (  # type: ignore
+    EmbedderClient,
+    OpenAIEmbedder,
+    OpenAIEmbedderConfig,
+)
 from graphiti_core.errors import EdgeNotFoundError, GroupsEdgesNotFoundError, NodeNotFoundError
 from graphiti_core.llm_client import LLMClient  # type: ignore
 from graphiti_core.nodes import EntityNode, EpisodicNode  # type: ignore

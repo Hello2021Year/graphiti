@@ -1,0 +1,10 @@
+# MySQL user manager config (MemOS-style). Load with UserManagerConfigFactory.from_yaml_file().
+# Or set env: USER_MANAGER_BACKEND=mysql, MYSQL_HOST=..., etc.
+backend: mysql
+config:
+  host: localhost
+  port: 3306
+  username: root
+  password: ""
+  database: memos_users
+  charset: utf8mb4
