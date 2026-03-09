@@ -32,8 +32,7 @@ from graph_service.dto import (
     Message,
     Result,
 )
-from graph_service.file_processing import process_doc_or_md
-from graph_service.idempotency import IdempotencyStore
+from graph_service.utils import IdempotencyStore, process_doc_or_md
 from graph_service.parsers import parse_file
 from graph_service.queue_backend import get_queue_backend
 from graph_service.queue_backend.base import IngestQueueBackend
