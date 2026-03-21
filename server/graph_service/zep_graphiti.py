@@ -1,7 +1,8 @@
+import asyncio
 import logging
 from typing import Annotated
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends
 from graphiti_core import Graphiti  # type: ignore
 from graphiti_core.edges import EntityEdge  # type: ignore
 from graphiti_core.errors import EdgeNotFoundError, GroupsEdgesNotFoundError, NodeNotFoundError
@@ -10,8 +11,12 @@ from graphiti_core.nodes import EntityNode, EpisodicNode  # type: ignore
 
 from graph_service.config import ZepEnvDep
 from graph_service.dto import FactResult
+from graph_service.errors import ResourceNotFoundError, ServiceNotReadyError
 
 logger = logging.getLogger(__name__)
+
+_graphiti_client: 'ZepGraphiti | None' = None
+_graphiti_lock = asyncio.Lock()
 
 
 class ZepGraphiti(Graphiti):
@@ -34,7 +39,7 @@ class ZepGraphiti(Graphiti):
             edge = await EntityEdge.get_by_uuid(self.driver, uuid)
             return edge
         except EdgeNotFoundError as e:
-            raise HTTPException(status_code=404, detail=e.message) from e
+            raise ResourceNotFoundError(e.message) from e
 
     async def delete_group(self, group_id: str):
         try:
@@ -61,22 +66,17 @@ class ZepGraphiti(Graphiti):
             edge = await EntityEdge.get_by_uuid(self.driver, uuid)
             await edge.delete(self.driver)
         except EdgeNotFoundError as e:
-            raise HTTPException(status_code=404, detail=e.message) from e
+            raise ResourceNotFoundError(e.message) from e
 
     async def delete_episodic_node(self, uuid: str):
         try:
             episode = await EpisodicNode.get_by_uuid(self.driver, uuid)
             await episode.delete(self.driver)
         except NodeNotFoundError as e:
-            raise HTTPException(status_code=404, detail=e.message) from e
+            raise ResourceNotFoundError(e.message) from e
 
 
-async def get_graphiti(settings: ZepEnvDep):
-    client = ZepGraphiti(
-        uri=settings.neo4j_uri,
-        user=settings.neo4j_user,
-        password=settings.neo4j_password,
-    )
+def _apply_llm_overrides(client: ZepGraphiti, settings: ZepEnvDep) -> None:
     if settings.openai_base_url is not None:
         client.llm_client.config.base_url = settings.openai_base_url
     if settings.openai_api_key is not None:
@@ -84,19 +84,55 @@ async def get_graphiti(settings: ZepEnvDep):
     if settings.model_name is not None:
         client.llm_client.model = settings.model_name
 
-    try:
-        yield client
-    finally:
-        await client.close()
 
-
-async def initialize_graphiti(settings: ZepEnvDep):
+def _create_graphiti_client(settings: ZepEnvDep) -> ZepGraphiti:
     client = ZepGraphiti(
         uri=settings.neo4j_uri,
         user=settings.neo4j_user,
         password=settings.neo4j_password,
     )
-    await client.build_indices_and_constraints()
+    _apply_llm_overrides(client, settings)
+    return client
+
+
+async def initialize_graphiti(settings: ZepEnvDep):
+    global _graphiti_client
+
+    async with _graphiti_lock:
+        if _graphiti_client is not None:
+            return _graphiti_client
+
+        client = _create_graphiti_client(settings)
+        try:
+            await client.build_indices_and_constraints()
+            _graphiti_client = client
+            return _graphiti_client
+        except Exception:
+            await client.close()
+            raise
+
+
+async def shutdown_graphiti() -> None:
+    global _graphiti_client
+
+    async with _graphiti_lock:
+        if _graphiti_client is None:
+            return
+
+        await _graphiti_client.close()
+        _graphiti_client = None
+
+
+def get_initialized_graphiti() -> ZepGraphiti:
+    if _graphiti_client is None:
+        raise ServiceNotReadyError('Graphiti client is not initialized')
+    return _graphiti_client
+
+
+async def get_graphiti(settings: ZepEnvDep):
+    if _graphiti_client is None:
+        await initialize_graphiti(settings)
+    return get_initialized_graphiti()
 
 
 def get_fact_result_from_edge(edge: EntityEdge):
